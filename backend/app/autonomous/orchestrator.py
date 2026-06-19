@@ -97,6 +97,11 @@ class AutonomousOrchestrator:
         async with AsyncSessionLocal() as db:
             optimizer = ScheduleOptimizer(db, self.analyzer)
             await optimizer.optimize_all()
+            
+            # Refresh the interval cache in continuous_scanner to apply new intervals
+            from app.tasks import refresh_source_intervals
+            refresh_source_intervals()
+            logger.info("[AUTONOMOUS] Refreshed source interval cache after optimization")
 
     async def _run_source_discovery(self) -> None:
         async with AsyncSessionLocal() as db:

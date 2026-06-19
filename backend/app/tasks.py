@@ -11,12 +11,41 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.connection import AsyncSessionLocal, get_db, manager
-from app.models import AnalysisRun, Channel, Developer, Job, Message, Operation, TelegramAccount, WebsiteSource
+from app.models import AnalysisRun, Channel, Developer, Job, Message, Operation, TelegramAccount, WebsiteSource, FetchOutcome
 from telegram_processor import TelegramClientManager, fetch_messages
 from telegram_processor.listener import TelegramMessageListener
 from services.ollama_service import get_analyzer, is_ollama_available, should_analyze_message
+from app.autonomous.budget_guard import OllamaBudgetGuard
+from app.autonomous.state_manager import AutonomousStateManager
 
 logger = logging.getLogger(__name__)
+
+
+async def record_fetch_outcome(
+    source_id: int,
+    source_type: str,
+    new_jobs: int = 0,
+    new_messages: int = 0,
+    duration_seconds: int = 0,
+    error: Optional[Exception] = None,
+) -> None:
+    """Record a fetch outcome for schedule optimization learning."""
+    try:
+        async with AsyncSessionLocal() as db:
+            outcome = FetchOutcome(
+                source_id=source_id,
+                source_type=source_type,
+                new_jobs_found=new_jobs,
+                new_messages=new_messages,
+                duration_seconds=duration_seconds,
+                error_type=type(error).__name__ if error else None,
+                error_message=str(error) if error else None,
+                fetched_at=datetime.utcnow(),
+            )
+            db.add(outcome)
+            await db.commit()
+    except Exception as e:
+        logger.error(f"[FETCH OUTCOME] Failed to record outcome: {e}")
 
 # Circuit breaker configuration
 MAX_CONSECUTIVE_FAILURES = int(os.getenv("MAX_CONSECUTIVE_FAILURES", "20"))
@@ -540,6 +569,9 @@ async def fetch_and_store_messages(
     operation_id = await create_operation(db, "fetch", channel, bulk_operation_id=bulk_operation_id)
 
     try:
+        fetch_start = datetime.now()
+        fetch_error = None
+        
         async with fetch_lock:
             await broadcast_progress("fetch_start", {"channel": channel.username, "days_back": days_back, "operation_id": operation_id})
             await telegram_manager.connect()
@@ -628,6 +660,16 @@ async def fetch_and_store_messages(
             channel.last_fetch_at = datetime.utcnow()
             await db.commit()
 
+            # Record fetch outcome for schedule optimization
+            duration = int((datetime.now() - fetch_start).total_seconds())
+            await record_fetch_outcome(
+                source_id=channel.id,
+                source_type="telegram",
+                new_jobs=0,
+                new_messages=new_count,
+                duration_seconds=duration,
+            )
+
             # Broadcast stats update after fetch
             await broadcast_stats_update(db)
 
@@ -648,8 +690,21 @@ async def fetch_and_store_messages(
             }
 
     except Exception as e:
+        fetch_error = e
         await db.rollback()
         await update_operation(db, operation_id, status="error", error_message=str(e))
+        
+        # Record fetch outcome with error
+        duration = int((datetime.now() - fetch_start).total_seconds())
+        await record_fetch_outcome(
+            source_id=channel.id,
+            source_type="telegram",
+            new_jobs=0,
+            new_messages=0,
+            duration_seconds=duration,
+            error=e,
+        )
+        
         # Broadcast error to frontend so it clears the UI
         await broadcast_progress("error", {
             "channel": channel_username,
@@ -1153,17 +1208,59 @@ async def analyze_messages(
 
 # ── CRON ──────────────────────────────────────────────────────────────────────
 
+# Module-level cache for source intervals to avoid frequent DB queries
+_source_intervals: dict[tuple[str, int], int] = {}
+
+
+def refresh_source_intervals() -> None:
+    """Clear the interval cache to force reload from database.
+    
+    Call this after the schedule optimizer updates source_scorings.
+    This is called by the autonomous orchestrator after optimization runs.
+    """
+    global _source_intervals
+    _source_intervals.clear()
+
+
 async def continuous_scanner(
     fetch_interval_minutes: int = 30,
     sleep_interval_seconds: int = 30,
 ) -> None:
-    """Continuously fetch and analyze messages from channels and website sources."""
-    global cron_running
+    """Continuously fetch and analyze messages from channels and website sources.
+    
+    Uses per-source intervals from source_scorings table if available,
+    otherwise falls back to default fetch_interval_minutes.
+    """
+    global cron_running, _source_intervals
 
     channel_index = 0
     website_index = 0
     last_fetch_time: dict[int, datetime] = {}
     last_website_fetch_time: dict[int, datetime] = {}
+
+    async def get_source_interval(source_type: str, source_id: int) -> int:
+        """Get optimized interval for a source, or default if not available."""
+        cache_key = (source_type, source_id)
+        if cache_key in _source_intervals:
+            return _source_intervals[cache_key]
+        
+        try:
+            from app.models import SourceScoring
+            result = await db.execute(
+                select(SourceScoring).filter(
+                    SourceScoring.source_id == source_id,
+                    SourceScoring.source_type == source_type,
+                )
+            )
+            scoring = result.scalar_one_or_none()
+            if scoring and scoring.recommended_interval_minutes:
+                _source_intervals[cache_key] = scoring.recommended_interval_minutes
+                return scoring.recommended_interval_minutes
+        except Exception:
+            pass
+        
+        _source_intervals[cache_key] = fetch_interval_minutes
+        return fetch_interval_minutes
 
     while cron_running:
         try:
@@ -1182,7 +1279,8 @@ async def continuous_scanner(
 
                         now = datetime.now(timezone.utc)
                         last = last_fetch_time.get(channel_id)
-                        due = last is None or (now - last).total_seconds() >= fetch_interval_minutes * 60
+                        interval_minutes = await get_source_interval("telegram", channel_id)
+                        due = last is None or (now - last).total_seconds() >= interval_minutes * 60
 
                         if due:
                             try:
@@ -1211,9 +1309,14 @@ async def continuous_scanner(
 
                         now = datetime.now(timezone.utc)
                         last_website = last_website_fetch_time.get(website_id)
-                        website_due = last_website is None or (now - last_website).total_seconds() >= fetch_interval_minutes * 60
+                        interval_minutes = await get_source_interval("website", website_id)
+                        website_due = last_website is None or (now - last_website).total_seconds() >= interval_minutes * 60
 
                         if website_due:
+                            fetch_start = datetime.now()
+                            fetch_error = None
+                            new_jobs_count = 0
+                            
                             try:
                                 from web_crawler.config import DEFAULT_DAYS_BACK as WEB_DAYS_BACK
 
@@ -1221,10 +1324,24 @@ async def continuous_scanner(
                                 if website.site_type == "bossjob":
                                     # Use Playwright for bossjob.com
                                     from web_crawler import fetch_posts
+                                    
+                                    # Initialize analyzer and budget_guard if Ollama is available
+                                    analyzer = None
+                                    budget_guard = None
+                                    state_manager = None
+                                    if await is_ollama_available():
+                                        analyzer = get_analyzer()
+                                        budget_guard = OllamaBudgetGuard(db)
+                                        state_manager = AutonomousStateManager(db)
+                                        await budget_guard.initialize()
+                                    
                                     posts = await fetch_posts(
                                         website.url,
                                         site_type="bossjob",
                                         days_back=WEB_DAYS_BACK,
+                                        analyzer=analyzer,
+                                        budget_guard=budget_guard,
+                                        state_manager=state_manager,
                                     )
                                     rss_entries = [
                                         {
@@ -1304,6 +1421,16 @@ async def continuous_scanner(
                                         last_website_fetch_time[website_id] = now
                                         await db.commit()
 
+                                        # Record fetch outcome for schedule optimization
+                                        duration = int((datetime.now() - fetch_start).total_seconds())
+                                        await record_fetch_outcome(
+                                            source_id=website.id,
+                                            source_type="website",
+                                            new_jobs=new_jobs_count,
+                                            new_messages=new_count,
+                                            duration_seconds=duration,
+                                        )
+
                                         # Analyze the new messages
                                         try:
                                             from app.tasks import analyze_website_posts
@@ -1313,6 +1440,18 @@ async def continuous_scanner(
                                 else:
                                     last_website_fetch_time[website_id] = now
                             except Exception as e:
+                                fetch_error = e
+                                
+                                # Record fetch outcome with error
+                                duration = int((datetime.now() - fetch_start).total_seconds())
+                                await record_fetch_outcome(
+                                    source_id=website.id,
+                                    source_type="website",
+                                    new_jobs=0,
+                                    new_messages=0,
+                                    duration_seconds=duration,
+                                    error=e,
+                                )
                                 pass
 
                 except Exception as e:

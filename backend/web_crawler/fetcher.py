@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 from playwright.async_api import async_playwright, Browser, Page
 
@@ -14,6 +14,10 @@ from web_crawler.config import (
     TIMEOUT,
     USER_AGENT,
 )
+from app.autonomous.self_healing_scraper import SelfHealingScraper, ScraperFailure
+from app.autonomous.state_manager import AutonomousStateManager
+from services.ollama_service import AsyncOllamaAnalyzer
+from app.autonomous.budget_guard import OllamaBudgetGuard
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,10 @@ async def fetch_posts(
     batch_size: int = DEFAULT_BATCH_SIZE,
     batch_delay: float = DEFAULT_BATCH_DELAY,
     cookies: list[dict] | None = None,
+    analyzer: Optional[AsyncOllamaAnalyzer] = None,
+    budget_guard: Optional[OllamaBudgetGuard] = None,
+    state_manager: Optional[AutonomousStateManager] = None,
+    proxy_pool: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     """Fetch posts from a website with batch processing.
 
@@ -35,6 +43,10 @@ async def fetch_posts(
         batch_size: Posts per page/batch (default: 20).
         batch_delay: Seconds to wait between batches (default: 2.0).
         cookies: Optional list of cookies for authenticated requests.
+        analyzer: Optional AsyncOllamaAnalyzer for self-healing selector recovery.
+        budget_guard: Optional OllamaBudgetGuard for LLM cost management.
+        state_manager: Optional AutonomousStateManager for persisting state.
+        proxy_pool: Optional list of proxy URLs for rotation.
 
     Returns:
         List of post dictionaries.
@@ -44,6 +56,56 @@ async def fetch_posts(
     today_midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     cutoff_date = today_midnight - timedelta(days=days_back)
 
+    # Use self-healing scraper if analyzer and budget_guard are provided
+    if analyzer and budget_guard:
+        try:
+            scraper = SelfHealingScraper(
+                analyzer=analyzer,
+                budget_guard=budget_guard,
+                state_manager=state_manager,
+                proxy_pool=proxy_pool,
+                max_attempts=3,
+            )
+            await scraper.initialize()
+
+            # Define extraction function based on site type
+            async def extract_fn(page):
+                # Add cookies if provided
+                if cookies:
+                    await page.context.add_cookies(cookies)
+                    logger.info(f"[FETCH] Added {len(cookies)} cookies for authentication")
+
+                # Set longer timeout for bossjob
+                page_timeout = 120000 if site_type == "bossjob" else TIMEOUT
+                page.set_default_timeout(page_timeout)
+
+                # Navigate to the URL
+                logger.info(f"[FETCH] Navigating to {url}")
+                wait_until = "commit" if site_type == "bossjob" else "networkidle"
+                await page.goto(url, wait_until=wait_until, timeout=page_timeout)
+
+                # Site-specific parsing
+                if site_type == "v2ex":
+                    return await _fetch_v2ex_posts(page, cutoff_date, batch_size, batch_delay)
+                elif site_type == "eleduck":
+                    return await _fetch_eleduck_posts(page, cutoff_date, batch_size, batch_delay)
+                elif site_type == "bossjob":
+                    return await _fetch_bossjob_posts(page, cutoff_date, batch_size, batch_delay)
+                else:
+                    logger.error(f"[FETCH] Unknown site type: {site_type}")
+                    return []
+
+            posts = await scraper.scrape(url, site_type, extract_fn)
+            return posts
+
+        except ScraperFailure as e:
+            logger.error(f"[FETCH] Self-healing scraper failed for {url}: {e}")
+            # Fall through to legacy fetcher as backup
+        except Exception as e:
+            logger.error(f"[FETCH] Self-healing scraper error for {url}: {e}", exc_info=True)
+            # Fall through to legacy fetcher as backup
+
+    # Legacy fetcher (fallback)
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=HEADLESS)
