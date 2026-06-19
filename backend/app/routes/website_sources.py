@@ -655,6 +655,58 @@ def register_website_source_routes(app):
             raise HTTPException(status_code=500, detail=str(e))
 
 
+def is_software_engineering_job(title: str, requirements: str = "") -> bool:
+    """Check if job title or requirements are software engineering related."""
+    if not title and not requirements:
+        return False
+    
+    # Combine title and requirements for checking
+    text_to_check = f"{title} {requirements}".lower()
+    
+    # Software engineering keywords (English)
+    se_keywords = [
+        'software engineer', 'software developer', 'full stack', 'fullstack',
+        'backend', 'front end', 'frontend', 'web developer', 'web engineer',
+        'mobile developer', 'ios developer', 'android developer',
+        'devops', 'sre', 'site reliability',
+        'data engineer', 'machine learning', 'ml engineer', 'ai engineer',
+        'python developer', 'java developer', 'javascript', 'typescript',
+        'react', 'vue', 'angular', 'node', 'go', 'golang', 'rust',
+        'qa engineer', 'quality assurance', 'test engineer',
+        'embedded', 'firmware', 'system engineer',
+        'blockchain', 'web3', 'smart contract',
+        'engineering manager', 'tech lead', 'principal engineer',
+        'staff engineer', 'senior engineer', 'junior engineer',
+    ]
+    
+    # Software engineering keywords (Chinese)
+    se_keywords_zh = [
+        '软件工程师', '软件开发', '全栈', '后端', '前端', '网页开发',
+        '移动开发', 'ios开发', 'android开发', '安卓开发',
+        '运维', '测试工程师', '质量保证',
+        '数据工程师', '机器学习', '人工智能', 'ai工程师',
+        'python开发', 'java开发', 'javascript', 'typescript',
+        'react', 'vue', 'angular', 'node', 'go', 'golang', 'rust',
+        '嵌入式', '固件', '系统工程师',
+        '区块链', 'web3', '智能合约',
+        '技术经理', '技术主管', '首席工程师',
+        '资深工程师', '高级工程师', '初级工程师',
+    ]
+    
+    # Check if any English keyword is in the text
+    for keyword in se_keywords:
+        if keyword in text_to_check:
+            return True
+    
+    # Check if any Chinese keyword is in the text (case-sensitive for Chinese)
+    text_to_check_original = f"{title} {requirements}"
+    for keyword in se_keywords_zh:
+        if keyword in text_to_check_original:
+            return True
+    
+    return False
+
+
 async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
     """Background task: fetch bossjob.com jobs with Playwright."""
     from app.connection import AsyncSessionLocal
@@ -707,8 +759,18 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
 
             # Save posts as Jobs directly (Bossjob has structured data)
             jobs_added = 0
+            jobs_filtered = 0
             for post in posts:
                 try:
+                    title = post.get("title", "")
+                    requirements = post.get("requirements", "")
+                    
+                    # Filter: only save software engineering jobs (check title and requirements)
+                    if not is_software_engineering_job(title, requirements):
+                        jobs_filtered += 1
+                        logger.info(f"[BG FETCH BOSSJOB] Filtered non-SE job: {title[:50]}...")
+                        continue
+                    
                     post_id = post.get("id", f"{source_id}-{hash(post.get('text', ''))}")
                     job_url = post.get("url", "")
                     
@@ -727,11 +789,13 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
                         website_source_id=source_id,
                         channel_name=source.name,
                         source_type="website",
-                        title=post.get("title", ""),
+                        title=title,
                         company=post.get("company", ""),
                         location=post.get("location", ""),
                         summary=post.get("description", "") + f"\n\nURL: {job_url}",
                         skills=post.get("requirements", ""),  # Store requirements in skills field
+                        contact=job_url,  # Store job URL as contact link
+                        contact_type="url",
                         is_applied=False,
                         is_hidden=False,
                     )
@@ -753,7 +817,7 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
                 "operation_id": operation_id,
             })
 
-            logger.info(f"[BG FETCH BOSSJOB] Completed: {jobs_added} new jobs from {source.name}")
+            logger.info(f"[BG FETCH BOSSJOB] Completed: {jobs_added} new jobs, {jobs_filtered} filtered (non-SE) from {source.name}")
 
         except Exception as e:
             logger.error(f"[BG FETCH BOSSJOB] Error: {e}", exc_info=True)

@@ -353,7 +353,7 @@ async def _fetch_bossjob_posts(
         List of post dictionaries with full job details.
     """
     posts: list[dict[str, Any]] = []
-    max_pages = 10
+    max_pages = 3  # Fetch only 3 pages for recent jobs
     jobs_per_page = min(batch_size, 10)  # Bossjob shows ~10 jobs per page
 
     try:
