@@ -12,7 +12,10 @@ from app.connection import get_db
 from web_crawler.config import DEFAULT_DAYS_BACK
 from app.models import WebsiteSource, Message, Job
 from web_crawler import Fetcher, Extractor
-from app.tasks import broadcast_progress, create_operation, update_operation, stop_website_operation, website_stop_events
+from app.tasks import broadcast_progress, create_operation, update_operation, stop_website_operation, website_stop_events, record_fetch_outcome
+from services.ollama_service import get_analyzer, is_ollama_available
+from app.autonomous.budget_guard import OllamaBudgetGuard
+from app.autonomous.state_manager import AutonomousStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -405,15 +408,33 @@ def register_website_source_routes(app):
             fetch_methods = []
 
             for source in sources:
+                fetch_start = datetime.now()
+                fetch_error = None
+                new_jobs_count = 0
+                
                 try:
                     # Fetch based on site type
                     if source.site_type == "bossjob":
                         # Use Playwright for bossjob.com
                         from web_crawler import fetch_posts
+                        
+                        # Initialize analyzer and budget_guard if Ollama is available
+                        analyzer = None
+                        budget_guard = None
+                        state_manager = None
+                        if await is_ollama_available():
+                            analyzer = get_analyzer()
+                            budget_guard = OllamaBudgetGuard(db)
+                            state_manager = AutonomousStateManager(db)
+                            await budget_guard.initialize()
+                        
                         posts = await fetch_posts(
                             source.url,
                             site_type="bossjob",
                             days_back=days_back or DEFAULT_DAYS_BACK,
+                            analyzer=analyzer,
+                            budget_guard=budget_guard,
+                            state_manager=state_manager,
                         )
                         rss_entries = [
                             {
@@ -501,10 +522,32 @@ def register_website_source_routes(app):
                     source.last_fetch_new_count = new_count
                     source.last_fetch_at = func.now()
                     total_new += new_count
-                    fetch_methods.append(fetch_result["type"])
+                    fetch_methods.append(fetch_result["type"] if source.site_type != "bossjob" else "playwright")
+                    
+                    # Record fetch outcome for schedule optimization
+                    duration = int((datetime.now() - fetch_start).total_seconds())
+                    await record_fetch_outcome(
+                        source_id=source.id,
+                        source_type="website",
+                        new_jobs=new_jobs_count,
+                        new_messages=new_count,
+                        duration_seconds=duration,
+                    )
 
                 except Exception as e:
+                    fetch_error = e
                     logger.error(f"[WEBSITE SOURCE] Error fetching from {source.name}: {e}", exc_info=True)
+                    
+                    # Record fetch outcome with error
+                    duration = int((datetime.now() - fetch_start).total_seconds())
+                    await record_fetch_outcome(
+                        source_id=source.id,
+                        source_type="website",
+                        new_jobs=0,
+                        new_messages=0,
+                        duration_seconds=duration,
+                        error=e,
+                    )
                     continue
 
             await db.commit()
@@ -712,9 +755,12 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
     from app.connection import AsyncSessionLocal
     from app.models import Message, WebsiteSource
     from web_crawler import fetch_posts
-    from app.tasks import update_operation, broadcast_progress
+    from app.tasks import update_operation, broadcast_progress, record_fetch_outcome
 
     async with AsyncSessionLocal() as db:
+        fetch_start = datetime.now()
+        fetch_error = None
+        
         try:
             result = await db.execute(select(WebsiteSource).filter(WebsiteSource.id == source_id))
             source = result.scalar_one_or_none()
@@ -740,11 +786,24 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
                 except json.JSONDecodeError:
                     logger.warning(f"[BG FETCH BOSSJOB] Invalid cookies JSON for source {source_id}")
 
+            # Initialize analyzer and budget_guard if Ollama is available
+            analyzer = None
+            budget_guard = None
+            state_manager = None
+            if await is_ollama_available():
+                analyzer = get_analyzer()
+                budget_guard = OllamaBudgetGuard(db)
+                state_manager = AutonomousStateManager(db)
+                await budget_guard.initialize()
+            
             posts = await fetch_posts(
                 source.url,
                 site_type="bossjob",
                 days_back=days_back,
                 cookies=cookies,
+                analyzer=analyzer,
+                budget_guard=budget_guard,
+                state_manager=state_manager,
             )
 
             if not posts:
@@ -810,6 +869,16 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
             source.last_fetch_new_count = jobs_added
             await db.commit()
 
+            # Record fetch outcome for schedule optimization
+            duration = int((datetime.now() - fetch_start).total_seconds())
+            await record_fetch_outcome(
+                source_id=source_id,
+                source_type="website",
+                new_jobs=jobs_added,
+                new_messages=0,
+                duration_seconds=duration,
+            )
+
             await update_operation(db, operation_id, status="completed")
             await broadcast_progress("fetch_complete", {
                 "channel": source.name,
@@ -820,7 +889,20 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
             logger.info(f"[BG FETCH BOSSJOB] Completed: {jobs_added} new jobs, {jobs_filtered} filtered (non-SE) from {source.name}")
 
         except Exception as e:
+            fetch_error = e
             logger.error(f"[BG FETCH BOSSJOB] Error: {e}", exc_info=True)
+            
+            # Record fetch outcome with error
+            duration = int((datetime.now() - fetch_start).total_seconds())
+            await record_fetch_outcome(
+                source_id=source_id,
+                source_type="website",
+                new_jobs=0,
+                new_messages=0,
+                duration_seconds=duration,
+                error=e,
+            )
+            
             try:
                 await update_operation(db, operation_id, status="error", error_message=str(e))
             except Exception:
