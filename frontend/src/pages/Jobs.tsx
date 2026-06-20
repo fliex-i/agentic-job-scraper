@@ -366,7 +366,7 @@ const Jobs = () => {
                             )}
                             {job.role_type && (
                               <>
-                                {job.role_type.split('|').map((role, idx) => (
+                                {job.role_type.split(/[|,]/).slice(0, 3).map((role, idx) => (
                                   <Badge
                                     key={idx}
                                     variant="secondary"
@@ -599,7 +599,7 @@ const Jobs = () => {
                         <h3 className="text-xs sm:text-sm font-semibold text-blue-900">{t('jobs.roleType')}</h3>
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        {selectedJob.role_type.split('|').map((role, idx) => (
+                        {selectedJob.role_type.split(/[|,]/).map((role, idx) => (
                           <Badge
                             key={idx}
                             className="bg-blue-100 text-blue-800 hover:bg-blue-200 border-blue-200 text-sm px-3 py-1"
