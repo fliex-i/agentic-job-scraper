@@ -63,3 +63,6 @@ pnpm-debug.log*
 
 # Other sites
 bossjob/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
