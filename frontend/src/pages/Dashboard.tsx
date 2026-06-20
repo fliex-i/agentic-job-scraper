@@ -871,7 +871,7 @@ const Dashboard = () => {
                       )}
                       {job.role_type && (
                         <div className="flex gap-1 flex-wrap">
-                          {job.role_type.split('|').map((role, idx) => (
+                          {job.role_type.split(/[|,]/).map((role, idx) => (
                             <Badge
                               key={idx}
                               variant="secondary"
