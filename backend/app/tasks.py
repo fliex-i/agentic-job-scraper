@@ -1322,7 +1322,7 @@ async def continuous_scanner(
 
                                 # Fetch based on site type
                                 if website.site_type == "bossjob":
-                                    # Use Playwright for bossjob.com
+                                    # Use Playwright for bossjob.us
                                     from web_crawler import fetch_posts
                                     
                                     # Initialize analyzer and budget_guard if Ollama is available

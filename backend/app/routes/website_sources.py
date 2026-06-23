@@ -27,8 +27,10 @@ def detect_site_type(url: str) -> str:
         return 'v2ex'
     elif 'eleduck.com' in url_lower:
         return 'eleduck'
-    elif 'bossjob.com' in url_lower:
+    elif 'bossjob.us' in url_lower:
         return 'bossjob'
+    elif 'linkedin.com' in url_lower:
+        return 'linkedin'
     else:
         # Default to generic (will use smart crawler)
         return 'generic'
@@ -250,12 +252,28 @@ def register_website_source_routes(app):
             })
 
             # Fetch based on site type — RSS for feeds, Playwright for dynamic sites
-            if source.site_type == "bossjob":
+            # URL-based detection takes priority for known sites (handles NULL / stale 'generic')
+            url_detected = detect_site_type(source.url)
+            effective_site_type = url_detected if url_detected != "generic" else (source.site_type or "generic")
+            # Auto-repair stale site_type in DB
+            if effective_site_type != source.site_type:
+                source.site_type = effective_site_type
+                await db.commit()
+            if effective_site_type == "bossjob":
                 # Run bossjob fetch in background (Playwright is slow)
                 asyncio.create_task(_fetch_bossjob_bg(source_id, operation_id, days_back or DEFAULT_DAYS_BACK))
                 return {
                     "success": True,
-                    "message": f"Bossjob fetch started for {source.name} in background (pages 1-10)",
+                    "message": f"Bossjob fetch started for {source.name} in background",
+                    "operation_id": operation_id,
+                    "fetch_method": "playwright_async",
+                }
+            elif effective_site_type == "linkedin":
+                # Run LinkedIn fetch in background (Playwright is slow)
+                asyncio.create_task(_fetch_linkedin_bg(source_id, operation_id, days_back or DEFAULT_DAYS_BACK))
+                return {
+                    "success": True,
+                    "message": f"LinkedIn fetch started for {source.name} in background",
                     "operation_id": operation_id,
                     "fetch_method": "playwright_async",
                 }
@@ -413,11 +431,13 @@ def register_website_source_routes(app):
                 new_jobs_count = 0
                 
                 try:
-                    # Fetch based on site type
-                    if source.site_type == "bossjob":
-                        # Use Playwright for bossjob.com
+                    # URL-based detection takes priority for known sites (handles NULL / stale 'generic')
+                    url_detected = detect_site_type(source.url)
+                    effective_site_type = url_detected if url_detected != "generic" else (source.site_type or "generic")
+                    if effective_site_type in ("bossjob", "linkedin"):
+                        # Use Playwright for dynamic job board sites
                         from web_crawler import fetch_posts
-                        
+
                         # Initialize analyzer and budget_guard if Ollama is available
                         analyzer = None
                         budget_guard = None
@@ -427,10 +447,10 @@ def register_website_source_routes(app):
                             budget_guard = OllamaBudgetGuard(db)
                             state_manager = AutonomousStateManager(db)
                             await budget_guard.initialize()
-                        
+
                         posts = await fetch_posts(
                             source.url,
-                            site_type="bossjob",
+                            site_type=effective_site_type,
                             days_back=days_back or DEFAULT_DAYS_BACK,
                             analyzer=analyzer,
                             budget_guard=budget_guard,
@@ -522,7 +542,7 @@ def register_website_source_routes(app):
                     source.last_fetch_new_count = new_count
                     source.last_fetch_at = func.now()
                     total_new += new_count
-                    fetch_methods.append(fetch_result["type"] if source.site_type != "bossjob" else "playwright")
+                    fetch_methods.append("playwright" if effective_site_type in ("bossjob", "linkedin") else fetch_result["type"])
                     
                     # Record fetch outcome for schedule optimization
                     duration = int((datetime.now() - fetch_start).total_seconds())
@@ -751,7 +771,7 @@ def is_software_engineering_job(title: str, requirements: str = "") -> bool:
 
 
 async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
-    """Background task: fetch bossjob.com jobs with Playwright."""
+    """Background task: fetch bossjob.us jobs with Playwright."""
     from app.connection import AsyncSessionLocal
     from app.models import Message, WebsiteSource
     from web_crawler import fetch_posts
@@ -903,6 +923,161 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
                 error=e,
             )
             
+            try:
+                await update_operation(db, operation_id, status="error", error_message=str(e))
+            except Exception:
+                pass
+
+
+async def _fetch_linkedin_bg(source_id: int, operation_id: str, days_back: int):
+    """Background task: fetch linkedin.com jobs with Playwright."""
+    from app.connection import AsyncSessionLocal
+    from app.models import Message, WebsiteSource
+    from web_crawler import fetch_posts
+    from app.tasks import update_operation, broadcast_progress, record_fetch_outcome
+
+    async with AsyncSessionLocal() as db:
+        fetch_start = datetime.now()
+
+        try:
+            result = await db.execute(select(WebsiteSource).filter(WebsiteSource.id == source_id))
+            source = result.scalar_one_or_none()
+            if not source:
+                logger.warning(f"[BG FETCH LINKEDIN] Source {source_id} not found")
+                return
+
+            logger.info(f"[BG FETCH LINKEDIN] Starting fetch for {source.name}")
+            await broadcast_progress("fetch_start", {
+                "channel": source.name,
+                "channel_id": source_id,
+                "operation_id": operation_id,
+            })
+
+            # Parse cookies if provided
+            import json
+            cookies = None
+            if source.cookies:
+                try:
+                    cookies = json.loads(source.cookies)
+                    if not isinstance(cookies, list):
+                        cookies = [cookies]
+                except json.JSONDecodeError:
+                    logger.warning(f"[BG FETCH LINKEDIN] Invalid cookies JSON for source {source_id}")
+
+            # Initialize Ollama components if available
+            analyzer = None
+            budget_guard = None
+            state_manager = None
+            if await is_ollama_available():
+                analyzer = get_analyzer()
+                budget_guard = OllamaBudgetGuard(db)
+                state_manager = AutonomousStateManager(db)
+                await budget_guard.initialize()
+
+            posts = await fetch_posts(
+                source.url,
+                site_type="linkedin",
+                days_back=days_back,
+                cookies=cookies,
+                analyzer=analyzer,
+                budget_guard=budget_guard,
+                state_manager=state_manager,
+            )
+
+            if not posts:
+                logger.info(f"[BG FETCH LINKEDIN] No posts found for {source.name}")
+                await update_operation(db, operation_id, status="completed")
+                await broadcast_progress("fetch_complete", {
+                    "channel": source.name,
+                    "new_messages": 0,
+                    "operation_id": operation_id,
+                })
+                return
+
+            # Save posts as Job records directly (structured data)
+            jobs_added = 0
+            jobs_filtered = 0
+            for post in posts:
+                try:
+                    title = post.get("title", "")
+                    requirements = post.get("requirements", "")
+
+                    if not is_software_engineering_job(title, requirements):
+                        jobs_filtered += 1
+                        logger.info(f"[BG FETCH LINKEDIN] Filtered non-SE job: {title[:50]}...")
+                        continue
+
+                    job_url = post.get("url", "")
+
+                    # Deduplicate by job URL
+                    existing_job = await db.execute(
+                        select(Job).filter(
+                            Job.website_source_id == source_id,
+                            Job.contact == job_url,
+                        )
+                    )
+                    if existing_job.scalar_one_or_none():
+                        continue
+
+                    job = Job(
+                        website_source_id=source_id,
+                        channel_name=source.name,
+                        source_type="website",
+                        title=title,
+                        company=post.get("company", ""),
+                        location=post.get("location", ""),
+                        summary=post.get("description", "") + (f"\n\nURL: {job_url}" if job_url else ""),
+                        skills=post.get("requirements", ""),
+                        contact=job_url,
+                        contact_type="url",
+                        is_applied=False,
+                        is_hidden=False,
+                    )
+                    db.add(job)
+                    jobs_added += 1
+                except Exception as e:
+                    logger.warning(f"[BG FETCH LINKEDIN] Error saving job: {e}")
+                    continue
+
+            await db.commit()
+            source.last_fetch_at = datetime.now()
+            source.last_fetch_new_count = jobs_added
+            await db.commit()
+
+            duration = int((datetime.now() - fetch_start).total_seconds())
+            await record_fetch_outcome(
+                source_id=source_id,
+                source_type="website",
+                new_jobs=jobs_added,
+                new_messages=0,
+                duration_seconds=duration,
+            )
+
+            await update_operation(db, operation_id, status="completed")
+            await broadcast_progress("fetch_complete", {
+                "channel": source.name,
+                "new_messages": jobs_added,
+                "operation_id": operation_id,
+            })
+
+            logger.info(
+                f"[BG FETCH LINKEDIN] Completed: {jobs_added} new jobs, "
+                f"{jobs_filtered} filtered (non-SE) from {source.name}"
+            )
+
+        except Exception as e:
+            logger.error(f"[BG FETCH LINKEDIN] Error: {e}", exc_info=True)
+
+            duration = int((datetime.now() - fetch_start).total_seconds())
+            await record_fetch_outcome(
+                source_id=source_id,
+                source_type="website",
+                new_jobs=0,
+                new_messages=0,
+                duration_seconds=duration,
+                error=e,
+            )
+
             try:
                 await update_operation(db, operation_id, status="error", error_message=str(e))
             except Exception:

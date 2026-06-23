@@ -1,6 +1,6 @@
 # Bossjob Cookie Exporter Chrome Extension
 
-One-click export of bossjob.com cookies to your job scraper dashboard.
+One-click export of bossjob.us cookies to your job scraper dashboard.
 
 ## Installation
 
@@ -18,7 +18,7 @@ One-click export of bossjob.com cookies to your job scraper dashboard.
 
 ## Usage
 
-1. **Login to bossjob.com** in Chrome (using Google login)
+1. **Login to bossjob.us** in Chrome (using Google login)
 2. **Click the extension icon** in Chrome toolbar
 3. **Enter your settings:**
    - Dashboard API URL: `http://localhost:8000` (or your backend URL)
@@ -27,19 +27,19 @@ One-click export of bossjob.com cookies to your job scraper dashboard.
 
 ## How it works
 
-- Extension reads cookies from `bossjob.com` domain
+- Extension reads cookies from `bossjob.us` domain
 - Formats them for Playwright authentication
 - Sends via API to update your website source
 - Cookies are then used automatically when scraping
 
 ## Troubleshooting
 
-- **"No cookies found"** - Make sure you're logged into bossjob.com
+- **"No cookies found"** - Make sure you're logged into bossjob.us
 - **"Connection refused"** - Check that your backend is running
 - **404 error** - Verify the source ID exists in your dashboard
 
 ## Security
 
-- Extension only reads cookies from bossjob.com
+- Extension only reads cookies from bossjob.us
 - Cookies are sent directly to your backend API
 - No data is stored or sent to third parties

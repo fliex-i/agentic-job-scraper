@@ -2,14 +2,14 @@
   "manifest_version": 3,
   "name": "Bossjob Cookie Exporter",
   "version": "1.0.0",
-  "description": "Export bossjob.com cookies to your job scraper dashboard",
+  "description": "Export bossjob.us cookies to your job scraper dashboard",
   "permissions": [
     "cookies",
     "activeTab",
     "storage"
   ],
   "host_permissions": [
-    "https://bossjob.com/*",
+    "https://bossjob.us/*",
     "http://localhost:8000/*"
   ],
   "action": {

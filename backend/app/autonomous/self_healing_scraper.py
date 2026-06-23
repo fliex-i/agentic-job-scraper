@@ -132,6 +132,7 @@ class SelfHealingScraper:
         site_type: str,
         extraction_fn: Optional[Callable] = None,
         html_sample_size: int = 8000,
+        cookies: Optional[list[dict]] = None,
     ) -> Any:
         """Scrape URL with self-healing retries.
 
@@ -140,6 +141,7 @@ class SelfHealingScraper:
             site_type: Identifier for selector registry (e.g., 'bossjob').
             extraction_fn: Optional async function(page) -> result.
             html_sample_size: Max characters of HTML sent to LLM for healing.
+            cookies: Optional pre-sanitised cookies to inject before navigation.
         """
         last_error: Optional[str] = None
 
@@ -159,6 +161,10 @@ class SelfHealingScraper:
                         locale=fingerprint.locale,
                         color_scheme=fingerprint.color_scheme,
                     )
+                    # Inject cookies before any navigation so authenticated
+                    # requests work from the very first page load.
+                    if cookies:
+                        await context.add_cookies(cookies)
                     page = await context.new_page()
 
                     try:

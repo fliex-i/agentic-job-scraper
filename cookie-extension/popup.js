@@ -47,7 +47,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const sources = data.sources || [];
       
       // Filter for bossjob sources
-      bossjobSources = sources.filter(s => s.site_type === 'bossjob' || s.url.includes('bossjob.com'));
+      bossjobSources = sources.filter(s => s.site_type === 'bossjob' || s.url.includes('bossjob.us'));
       
       if (bossjobSources.length === 0) {
         sourceSelect.innerHTML = '<option value="">No bossjob sources found</option>';
@@ -81,14 +81,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     exportBtn.disabled = true;
-    showStatus('Fetching cookies from bossjob.com...', 'info');
+    showStatus('Fetching cookies from bossjob.us...', 'info');
 
     try {
-      // Get cookies from bossjob.com
-      const cookies = await chrome.cookies.getAll({ domain: 'bossjob.com' });
+      // Get cookies from bossjob.us
+      const cookies = await chrome.cookies.getAll({ domain: 'bossjob.us' });
       
       if (cookies.length === 0) {
-        showStatus('No cookies found. Please login to bossjob.com first.', 'error');
+        showStatus('No cookies found. Please login to bossjob.us first.', 'error');
         exportBtn.disabled = false;
         return;
       }
@@ -149,13 +149,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     statusDiv.className = `status ${type}`;
   }
 
-  // Check if on bossjob.com
+  // Check if on bossjob.us
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const url = tabs[0]?.url || '';
-    if (url.includes('bossjob.com')) {
-      showStatus('Ready to export cookies from bossjob.com', 'success');
+    if (url.includes('bossjob.us')) {
+      showStatus('Ready to export cookies from bossjob.us', 'success');
     } else {
-      showStatus('Navigate to bossjob.com and login first', 'info');
+      showStatus('Navigate to bossjob.us and login first', 'info');
     }
   });
 });

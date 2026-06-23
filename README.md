@@ -19,7 +19,7 @@
 
 ## 🎯 Overview
 
-Agentic Job Scraper is an automated system that fetches software development job postings from Telegram channels, RSS feeds (e.g., V2EX, 电鸭社区), and job boards (Bossjob.com), analyzes them using local AI (Ollama), and presents them in a modern web interface. Perfect for developers hunting for remote opportunities or recruiters monitoring market trends.
+Agentic Job Scraper is an automated system that fetches software development job postings from Telegram channels, RSS feeds (e.g., V2EX, 电鸭社区), and job boards (Bossjob.com, LinkedIn), analyzes them using local AI (Ollama), and presents them in a modern web interface. Perfect for developers hunting for remote opportunities or recruiters monitoring market trends.
 
 ## ✨ Features
 
@@ -28,6 +28,7 @@ Agentic Job Scraper is an automated system that fetches software development job
 - **📡 Real-time Listener** — Start/stop real-time message listener from dashboard for instant job posting capture
 - **🌐 RSS Feed Support** — Fetch and analyze job postings from RSS feeds (V2EX, 电鸭社区, etc.)
 - **🎯 Bossjob.com Integration** — Playwright-based scraping with structured job extraction (title, company, location, requirements)
+- **🔗 LinkedIn Integration** — Playwright-based scraping supporting both public job search and authenticated (cookie-injected) sessions, with structured job extraction and SE-role filtering
 - **🤖 AI-Powered Analysis** — Uses Ollama (qwen2.5:14b or qwen2.5:7b) to extract structured job/developer data
 - **📊 Real-time Progress** — WebSocket-based progress tracking with per-message status updates
 - **🔔 Browser Notifications** — Get notified when new jobs or developers are discovered
@@ -56,7 +57,7 @@ Agentic Job Scraper is an automated system that fetches software development job
 - **💾 Token Monitoring** — Real-time token usage tracking for Ollama API calls
 - **🔄 Cron Auto-Analysis** — Continuous scanner automatically analyzes after fetching (both Telegram and RSS)
 - **⏱ Robust RSS Fetching** — 30-second timeout and 7-day lookback window for RSS feeds
-- **🍪 Cookie Extension** — Chrome extension for one-click Bossjob.com cookie export
+- **🍪 Cookie Extension** — Chrome extension for one-click Bossjob.com / LinkedIn cookie export
 - **🤖 Autonomous Agent Mode** — Self-adjusting schedules, self-healing Playwright scrapers, and automated source discovery
 
 ### Autonomous Agent Mode (Optional)
@@ -67,13 +68,14 @@ The system can run as a self-sustaining agent when `ENABLE_AUTONOMOUS_MODE=true`
 - **Self-Healing Playwright** — Rotates fingerprints/proxies and uses LLM to recover from broken selectors
 - **Token Budget Guard** — Enforces a daily Ollama token budget so self-learning cannot exhaust resources
 
-Works with existing sources: Telegram channels, Bossjob.com, Dianya (电鸭社区), V2EX.
+Works with existing sources: Telegram channels, Bossjob.com, LinkedIn, Dianya (电鸭社区), V2EX.
 
 Auto-apply is explicitly **not** implemented; autonomy is limited to optimizing existing sources.
 
 ## 🚀 Planned Features
 
-- [ ] Extended job board support (more career sites beyond Bossjob.com)
+- [ ] Extended job board support (more career sites beyond Bossjob.com and LinkedIn)
+- [ ] LinkedIn cookie Chrome extension (similar to the Bossjob exporter)
 - [ ] Additional i18n languages
 - [ ] Docker containerization
 - [ ] CI/CD pipeline

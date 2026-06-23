@@ -21,6 +21,49 @@ from app.autonomous.budget_guard import OllamaBudgetGuard
 
 logger = logging.getLogger(__name__)
 
+# sameSite values accepted by Playwright
+_SAME_SITE_MAP = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+    "no_restriction": "None",   # Chrome extension export
+    "unspecified": "Lax",       # Chrome extension export
+    "": "Lax",
+}
+
+
+def _sanitize_cookies(cookies: list[dict]) -> list[dict]:
+    """Normalise cookie fields so Playwright accepts them.
+
+    Browser extensions (e.g. Chrome's cookie export) use different field names
+    and value formats than Playwright expects:
+      - expirationDate (float)  →  expires (int)
+      - sameSite "unspecified" / "no_restriction" / lowercase  →  Strict|Lax|None
+      - hostOnly / session / storeId are stripped (Playwright doesn't accept them)
+    """
+    allowed_keys = {
+        "name", "value", "domain", "path", "expires",
+        "httpOnly", "secure", "sameSite",
+    }
+    result = []
+    for raw in cookies:
+        cookie: dict = {}
+
+        for k, v in raw.items():
+            # Rename expirationDate → expires and cast to int
+            if k == "expirationDate":
+                cookie["expires"] = int(v)
+            elif k in allowed_keys:
+                cookie[k] = v
+            # All other keys (hostOnly, session, storeId, …) are dropped
+
+        # Normalise sameSite
+        same_site = str(cookie.get("sameSite", "")).strip()
+        cookie["sameSite"] = _SAME_SITE_MAP.get(same_site.lower(), "Lax")
+
+        result.append(cookie)
+    return result
+
 
 async def fetch_posts(
     url: str,
@@ -69,19 +112,17 @@ async def fetch_posts(
             await scraper.initialize()
 
             # Define extraction function based on site type
+            # NOTE: cookies are injected into the context by the scraper before
+            # the first navigation — no need to call add_cookies here.
             async def extract_fn(page):
-                # Add cookies if provided
-                if cookies:
-                    await page.context.add_cookies(cookies)
-                    logger.info(f"[FETCH] Added {len(cookies)} cookies for authentication")
 
-                # Set longer timeout for bossjob
-                page_timeout = 120000 if site_type == "bossjob" else TIMEOUT
+                # Set longer timeout for heavy SPA sites
+                page_timeout = 120000 if site_type in ("bossjob", "linkedin") else TIMEOUT
                 page.set_default_timeout(page_timeout)
 
                 # Navigate to the URL
                 logger.info(f"[FETCH] Navigating to {url}")
-                wait_until = "commit" if site_type == "bossjob" else "networkidle"
+                wait_until = "commit" if site_type in ("bossjob", "linkedin") else "networkidle"
                 await page.goto(url, wait_until=wait_until, timeout=page_timeout)
 
                 # Site-specific parsing
@@ -91,11 +132,14 @@ async def fetch_posts(
                     return await _fetch_eleduck_posts(page, cutoff_date, batch_size, batch_delay)
                 elif site_type == "bossjob":
                     return await _fetch_bossjob_posts(page, cutoff_date, batch_size, batch_delay)
+                elif site_type == "linkedin":
+                    return await _fetch_linkedin_posts(page, cutoff_date, batch_size, batch_delay)
                 else:
                     logger.error(f"[FETCH] Unknown site type: {site_type}")
                     return []
 
-            posts = await scraper.scrape(url, site_type, extract_fn)
+            sanitized_cookies = _sanitize_cookies(cookies) if cookies else None
+            posts = await scraper.scrape(url, site_type, extract_fn, cookies=sanitized_cookies)
             return posts
 
         except ScraperFailure as e:
@@ -116,18 +160,18 @@ async def fetch_posts(
 
             # Add cookies if provided (for authenticated sites)
             if cookies:
-                await context.add_cookies(cookies)
+                await context.add_cookies(_sanitize_cookies(cookies))
                 logger.info(f"[FETCH] Added {len(cookies)} cookies for authentication")
 
             page = await context.new_page()
-            # Set longer timeout for bossjob (slow site with many ads)
-            page_timeout = 120000 if site_type == "bossjob" else TIMEOUT
+            # Set longer timeout for heavy SPA sites
+            page_timeout = 120000 if site_type in ("bossjob", "linkedin") else TIMEOUT
             page.set_default_timeout(page_timeout)
 
             # Navigate to the URL
             logger.info(f"[FETCH] Navigating to {url}")
-            # Use less strict wait for bossjob (has lots of ads/analytics)
-            wait_until = "commit" if site_type == "bossjob" else "networkidle"
+            # Use less strict wait for SPA sites with lots of ads/analytics
+            wait_until = "commit" if site_type in ("bossjob", "linkedin") else "networkidle"
             await page.goto(url, wait_until=wait_until, timeout=page_timeout)
 
             # Site-specific parsing
@@ -137,6 +181,8 @@ async def fetch_posts(
                 posts = await _fetch_eleduck_posts(page, cutoff_date, batch_size, batch_delay)
             elif site_type == "bossjob":
                 posts = await _fetch_bossjob_posts(page, cutoff_date, batch_size, batch_delay)
+            elif site_type == "linkedin":
+                posts = await _fetch_linkedin_posts(page, cutoff_date, batch_size, batch_delay)
             else:
                 logger.error(f"[FETCH] Unknown site type: {site_type}")
 
@@ -399,7 +445,7 @@ async def _fetch_bossjob_posts(
     batch_size: int,
     batch_delay: float,
 ) -> list[dict[str, Any]]:
-    """Fetch job posts from bossjob.com with detail page scraping.
+    """Fetch job posts from bossjob.us with detail page scraping.
 
     Uses JavaScript extraction via page.evaluate() to avoid stale element handles.
     First extracts all job data (title, company, item_id) from listing page,
@@ -526,7 +572,7 @@ async def _fetch_bossjob_posts(
                     logger.info(f"[FETCH BOSSJOB] Job {idx+1}/{len(jobs_data[:jobs_per_page])}: {title[:50]}... (item_id: {item_id})")
 
                     # Construct job URL for reference
-                    job_url = f"https://bossjob.com/en-us/job/{item_id}"
+                    job_url = f"https://bossjob.us/en-us/job/{item_id}"
 
                     # Click the job card to open modal/sidebar
                     card_elements = await page.query_selector_all(card_selector)
@@ -838,4 +884,293 @@ async def _fetch_bossjob_posts(
         logger.error(f"[FETCH BOSSJOB] Error: {e}", exc_info=True)
 
     logger.info(f"[FETCH BOSSJOB] Total jobs fetched: {len(posts)}")
+    return posts
+
+
+async def _fetch_linkedin_posts(
+    page: Page,
+    cutoff_date: datetime,
+    batch_size: int,
+    batch_delay: float,
+) -> list[dict[str, Any]]:
+    """Fetch job posts from linkedin.com/jobs with detail page scraping.
+
+    Supports both public (unauthenticated) and authenticated (cookie-injected) sessions.
+    Extracts job cards from the search listing, then navigates to each job detail page.
+
+    Args:
+        page: Playwright page instance (cookies already injected by caller if needed).
+        cutoff_date: Date cutoff for posts (not strictly enforced; fetches recent pages).
+        batch_size: Max jobs to process per page.
+        batch_delay: Seconds to wait between job fetches.
+
+    Returns:
+        List of post dictionaries with full job details.
+    """
+    posts: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    max_pages = 3
+    jobs_per_page = min(batch_size, 25)
+
+    card_wait_selectors = [
+        "[data-job-id]",
+        ".job-card-container",
+        ".jobs-job-board-list__item",
+        "li.scaffold-finite-scroll__content-item",
+        "a[href*='/jobs/view/']",
+    ]
+
+    async def _wait_for_linkedin_cards() -> None:
+        for selector in card_wait_selectors:
+            try:
+                await page.wait_for_selector(selector, timeout=9000)
+                return
+            except Exception:
+                continue
+
+        # collections 页面常见懒加载，滚动一次再等
+        await page.evaluate("window.scrollTo(0, Math.max(500, document.body.scrollHeight * 0.25))")
+        await asyncio.sleep(2)
+
+    try:
+        for page_num in range(max_pages):
+            logger.info(f"[FETCH LINKEDIN] Page {page_num + 1}/{max_pages}")
+            await _wait_for_linkedin_cards()
+
+            jobs_data = await page.evaluate("""
+                () => {
+                    const jobs = [];
+                    const seen = new Set();
+
+                    // Strategy A: Auth/SPA cards with data-job-id
+                    const authCards = document.querySelectorAll('[data-job-id]');
+                    authCards.forEach((card, index) => {
+                        const jobId = card.getAttribute('data-job-id') || '';
+
+                        const titleEl = card.querySelector(
+                            '.job-card-list__title--link, .job-card-list__title, '
+                            + 'strong.job-card-search__title, h3 a, h3, a[href*="/jobs/view/"]'
+                        );
+                        const title = (titleEl?.innerText || titleEl?.getAttribute('aria-label') || '').trim();
+
+                        let jobUrl = titleEl?.href || '';
+                        if (!jobUrl && jobId) {
+                            jobUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
+                        }
+
+                        const companyEl = card.querySelector(
+                            '.job-card-container__primary-description, '
+                            + '.artdeco-entity-lockup__subtitle, '
+                            + '[class*="company"]'
+                        );
+                        const company = (companyEl?.innerText || '').trim();
+
+                        const locEl = card.querySelector(
+                            '.job-card-container__metadata-item, '
+                            + '.job-card-container__metadata-wrapper li, '
+                            + '[class*="location"]'
+                        );
+                        const location = (locEl?.innerText || '').trim();
+
+                        const dedupKey = jobId || jobUrl;
+                        if (!dedupKey || seen.has(dedupKey)) return;
+                        seen.add(dedupKey);
+
+                        if (title || jobId) {
+                            jobs.push({
+                                job_id: jobId,
+                                title,
+                                company,
+                                location,
+                                job_url: jobUrl,
+                                card_index: index,
+                                is_auth: true,
+                            });
+                        }
+                    });
+
+                    // Strategy B: Fallback via links (/jobs/view/)
+                    if (jobs.length === 0) {
+                        const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+                        links.forEach((link, index) => {
+                            const href = link.href || '';
+                            const m = href.match(/\/jobs\/view\/(\d+)/);
+                            const jobId = m ? m[1] : '';
+                            const dedupKey = jobId || href;
+                            if (!dedupKey || seen.has(dedupKey)) return;
+                            seen.add(dedupKey);
+
+                            const container = link.closest('li, article, div');
+                            const title = (link.innerText || link.getAttribute('aria-label') || '').trim();
+
+                            const companyEl = container?.querySelector(
+                                '.base-search-card__subtitle, [class*="company"], [class*="subtitle"]'
+                            );
+                            const company = (companyEl?.innerText || '').trim();
+
+                            const locEl = container?.querySelector(
+                                '.job-search-card__location, [class*="location"], [class*="metadata"]'
+                            );
+                            const location = (locEl?.innerText || '').trim();
+
+                            jobs.push({
+                                job_id: jobId,
+                                title,
+                                company,
+                                location,
+                                job_url: href,
+                                card_index: index,
+                                is_auth: true,
+                            });
+                        });
+                    }
+
+                    return jobs;
+                }
+            """)
+
+            if not jobs_data:
+                debug = await page.evaluate("""
+                    () => ({
+                        url: location.href,
+                        title: document.title,
+                        dataJobIdCount: document.querySelectorAll('[data-job-id]').length,
+                        jobViewLinkCount: document.querySelectorAll('a[href*="/jobs/view/"]').length,
+                        cardCount: document.querySelectorAll('.job-card-container, .jobs-job-board-list__item, li.scaffold-finite-scroll__content-item').length,
+                    })
+                """)
+                logger.warning(f"[FETCH LINKEDIN] No job cards found on page {page_num + 1}, debug={debug}")
+                break
+
+            logger.info(f"[FETCH LINKEDIN] Found {len(jobs_data)} jobs on page {page_num + 1}")
+
+            for idx, job_data in enumerate(jobs_data[:jobs_per_page]):
+                try:
+                    title = job_data.get("title", "").strip()
+                    company = job_data.get("company", "").strip()
+                    location = job_data.get("location", "").strip()
+                    job_id = job_data.get("job_id", "")
+                    job_url = job_data.get("job_url", "").strip()
+
+                    if not job_url and job_id:
+                        job_url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+                    if job_url and not job_url.startswith("http"):
+                        job_url = f"https://www.linkedin.com{job_url}"
+
+                    dedup_key = job_id or job_url
+                    if not dedup_key or dedup_key in seen_ids:
+                        continue
+                    seen_ids.add(dedup_key)
+
+                    if not title and not job_id:
+                        continue
+
+                    description = ""
+                    salary = ""
+                    requirements = ""
+
+                    # 尝试点击列表项读取右侧详情（auth collections/search 均可）
+                    card_elements = await page.query_selector_all("[data-job-id], .job-card-container, .jobs-job-board-list__item")
+                    card_index = job_data.get("card_index", 0)
+                    if card_index < len(card_elements):
+                        try:
+                            await card_elements[card_index].click()
+                            await asyncio.sleep(1.5)
+                            await page.wait_for_selector(
+                                ".jobs-description__content, .jobs-box__html-content, .job-details-jobs-unified-top-card__job-insight",
+                                timeout=7000,
+                            )
+                        except Exception:
+                            pass
+
+                    detail_data = await page.evaluate("""
+                        () => {
+                            const result = { description: '', salary: '' };
+
+                            const descEl = document.querySelector(
+                                '.jobs-description__content .jobs-description-content__text, '
+                                + '.jobs-description-content__text--stretch, '
+                                + '.jobs-box__html-content, '
+                                + '.show-more-less-html__markup'
+                            );
+                            if (descEl) {
+                                result.description = (descEl.innerText || '').trim();
+                            }
+
+                            const salaryEl = document.querySelector(
+                                '.compensation__salary, '
+                                + '[class*="salary"], '
+                                + '[class*="compensation"], '
+                                + '.job-details-jobs-unified-top-card__job-insight-view-model-secondary'
+                            );
+                            if (salaryEl) {
+                                result.salary = (salaryEl.innerText || '').trim();
+                            }
+
+                            return result;
+                        }
+                    """)
+                    description = detail_data.get("description", "")
+                    salary = detail_data.get("salary", "")
+
+                    full_text_parts = [title or f"LinkedIn Job {job_id}"]
+                    if company:
+                        full_text_parts.append(f"Company: {company}")
+                    if salary:
+                        full_text_parts.append(f"Salary: {salary}")
+                    if location:
+                        full_text_parts.append(f"Location: {location}")
+                    if description:
+                        full_text_parts.append(f"Description: {description}")
+                    full_text = "\n\n".join(full_text_parts)
+
+                    posts.append({
+                        "id": job_id if job_id else f"linkedin_{page_num}_{idx}",
+                        "title": title or f"LinkedIn Job {job_id}",
+                        "url": job_url,
+                        "company": company,
+                        "date": datetime.now(),
+                        "text": full_text,
+                        "analysis_text": description,
+                        "salary": salary,
+                        "location": location,
+                        "requirements": requirements,
+                        "description": description,
+                    })
+
+                    logger.info(f"[FETCH LINKEDIN] ✓ {posts[-1]['title'][:50]} ({len(full_text)} chars)")
+                    await asyncio.sleep(batch_delay)
+
+                except Exception as e:
+                    logger.warning(f"[FETCH LINKEDIN] Error processing job {idx + 1}: {e}")
+                    continue
+
+            # Pagination: collections 页面优先滚动，search 页面优先 start= 参数
+            try:
+                current_url = page.url
+                if "/jobs/collections/" in current_url:
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(batch_delay + 2)
+                else:
+                    if "start=" in current_url:
+                        import re as _re
+                        m = _re.search(r"start=(\d+)", current_url)
+                        current_start = int(m.group(1)) if m else page_num * 25
+                        next_url = _re.sub(r"start=\d+", f"start={current_start + 25}", current_url)
+                    else:
+                        separator = "&" if "?" in current_url else "?"
+                        next_url = f"{current_url}{separator}start={(page_num + 1) * 25}"
+
+                    logger.info(f"[FETCH LINKEDIN] Navigating to page {page_num + 2}: {next_url}")
+                    await page.goto(next_url, wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(batch_delay + 1)
+
+            except Exception as e:
+                logger.warning(f"[FETCH LINKEDIN] Pagination error: {e}")
+                break
+
+    except Exception as e:
+        logger.error(f"[FETCH LINKEDIN] Error: {e}", exc_info=True)
+
+    logger.info(f"[FETCH LINKEDIN] Total jobs fetched: {len(posts)}")
     return posts
