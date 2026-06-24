@@ -162,6 +162,10 @@ class Job(Base):
     contact = Column(String, nullable=True)
     contact_type = Column(String, nullable=True)
     summary = Column(Text, nullable=True)
+    source_published_at = Column(DateTime, nullable=True)  # Published time from source website
+    source_updated_at = Column(DateTime, nullable=True)  # Updated/reposted time from source website
+    source_published_text = Column(String, nullable=True)  # Raw published time text from source (e.g. "3 days ago")
+    source_updated_text = Column(String, nullable=True)  # Raw updated time text from source (e.g. "Reposted 1 day ago")
 
     is_applied = Column(Boolean, default=False)
     applied_at = Column(DateTime, nullable=True)
@@ -200,6 +204,10 @@ class Job(Base):
             "contact": self.contact,
             "contact_type": self.contact_type,
             "summary": self.summary,
+            "source_published_at": self.source_published_at.isoformat() if self.source_published_at else None,
+            "source_updated_at": self.source_updated_at.isoformat() if self.source_updated_at else None,
+            "source_published_text": self.source_published_text,
+            "source_updated_text": self.source_updated_text,
             "is_applied": self.is_applied,
             "applied_at": self.applied_at.isoformat() if self.applied_at else None,
             "notes": self.notes,

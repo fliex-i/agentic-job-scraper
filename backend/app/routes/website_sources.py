@@ -875,6 +875,10 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
                         skills=post.get("requirements", ""),  # Store requirements in skills field
                         contact=job_url,  # Store job URL as contact link
                         contact_type="url",
+                        source_published_at=post.get("source_published_at"),
+                        source_updated_at=post.get("source_updated_at"),
+                        source_published_text=post.get("source_published_text"),
+                        source_updated_text=post.get("source_updated_text"),
                         is_applied=False,
                         is_hidden=False,
                     )
@@ -1030,6 +1034,10 @@ async def _fetch_linkedin_bg(source_id: int, operation_id: str, days_back: int):
                         skills=post.get("requirements", ""),
                         contact=job_url,
                         contact_type="url",
+                        source_published_at=post.get("source_published_at"),
+                        source_updated_at=post.get("source_updated_at"),
+                        source_published_text=post.get("source_published_text"),
+                        source_updated_text=post.get("source_updated_text"),
                         is_applied=False,
                         is_hidden=False,
                     )

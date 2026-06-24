@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from playwright.async_api import async_playwright, Browser, Page
 
@@ -30,6 +32,169 @@ _SAME_SITE_MAP = {
     "unspecified": "Lax",       # Chrome extension export
     "": "Lax",
 }
+
+
+def _build_linkedin_navigation_urls(raw_url: str) -> list[str]:
+    """Build stable LinkedIn jobs URLs to reduce redirect loops.
+
+    Removes volatile query params (e.g. currentJobId/origin/spellCorrectionEnabled)
+    and returns multiple safe fallbacks.
+    """
+    base_search = "https://www.linkedin.com/jobs/search/"
+    parsed = urlparse(raw_url or "")
+    query = parse_qs(parsed.query)
+
+    allowed_keys = {
+        "keywords",
+        "location",
+        "f_WT",
+        "f_TPR",
+        "f_E",
+        "f_JT",
+        "f_AL",
+        "f_LF",
+        "f_WRA",
+        "distance",
+        "geoId",
+        "start",
+    }
+
+    cleaned_query: dict[str, str] = {}
+    for k, vals in query.items():
+        if k in allowed_keys and vals:
+            cleaned_query[k] = vals[-1]
+
+    # Ensure stable defaults for job scraping when URL is too sparse
+    if "keywords" not in cleaned_query:
+        cleaned_query["keywords"] = "software engineer"
+    if "location" not in cleaned_query:
+        cleaned_query["location"] = "Worldwide"
+    if "f_WT" not in cleaned_query:
+        cleaned_query["f_WT"] = "2"
+
+    urls: list[str] = []
+    urls.append(f"{base_search}?{urlencode(cleaned_query)}")
+    urls.append("https://www.linkedin.com/jobs/search/?keywords=software%20engineer&location=Worldwide&f_WT=2")
+    urls.append("https://www.linkedin.com/jobs/")
+
+    # Include the raw URL last as final fallback.
+    if raw_url:
+        urls.append(raw_url)
+
+    # Dedupe while preserving order.
+    seen: set[str] = set()
+    result: list[str] = []
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            result.append(u)
+    return result
+
+
+async def _goto_with_linkedin_fallback(
+    page: Page,
+    url: str,
+    site_type: str,
+    timeout: int,
+    wait_until: str,
+) -> str:
+    """Navigate with LinkedIn-specific fallback URLs on redirect loops."""
+    if site_type != "linkedin":
+        await page.goto(url, wait_until=wait_until, timeout=timeout)
+        return url
+
+    candidates = _build_linkedin_navigation_urls(url)
+    last_error: Optional[Exception] = None
+
+    for idx, candidate in enumerate(candidates, start=1):
+        try:
+            await page.goto(candidate, wait_until=wait_until, timeout=timeout)
+
+            # LinkedIn may silently redirect to login; try next candidate.
+            final_url = (page.url or "").lower()
+            if "/login" in final_url or "session_redirect" in final_url:
+                logger.warning(
+                    "[FETCH LINKEDIN] Candidate %d redirected to login: %s",
+                    idx,
+                    page.url,
+                )
+                continue
+
+            if idx > 1:
+                logger.info("[FETCH LINKEDIN] Navigation fallback succeeded with: %s", candidate)
+            return candidate
+        except Exception as e:
+            last_error = e
+            logger.warning("[FETCH LINKEDIN] Navigation candidate %d failed: %s", idx, e)
+            continue
+
+    if last_error:
+        raise last_error
+    await page.goto(url, wait_until=wait_until, timeout=timeout)
+    return url
+
+
+def _parse_relative_datetime(text: str) -> Optional[datetime]:
+    """Parse relative/absolute datetime text from job sites.
+
+    Supports common LinkedIn strings like "3 days ago", "Reposted 2 weeks ago",
+    and Chinese forms like "3天前".
+    """
+    if not text:
+        return None
+
+    raw = text.strip()
+    t = raw.lower()
+    now = datetime.utcnow()
+
+    if "just now" in t or "刚刚" in raw:
+        return now
+    if "yesterday" in t or "昨天" in raw:
+        return now - timedelta(days=1)
+    if "today" in t or "今天" in raw:
+        return now
+
+    m = re.search(r"(\d+)\s*(minute|min|hour|day|week|month|year)s?\s+ago", t)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit in ("minute", "min"):
+            return now - timedelta(minutes=n)
+        if unit == "hour":
+            return now - timedelta(hours=n)
+        if unit == "day":
+            return now - timedelta(days=n)
+        if unit == "week":
+            return now - timedelta(weeks=n)
+        if unit == "month":
+            return now - timedelta(days=30 * n)
+        if unit == "year":
+            return now - timedelta(days=365 * n)
+
+    m = re.search(r"(\d+)\s*(分钟|小时|天|周|个月|月|年)前", raw)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit == "分钟":
+            return now - timedelta(minutes=n)
+        if unit == "小时":
+            return now - timedelta(hours=n)
+        if unit == "天":
+            return now - timedelta(days=n)
+        if unit == "周":
+            return now - timedelta(weeks=n)
+        if unit in ("个月", "月"):
+            return now - timedelta(days=30 * n)
+        if unit == "年":
+            return now - timedelta(days=365 * n)
+
+    for fmt in ("%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except Exception:
+            pass
+
+    return None
 
 
 def _sanitize_cookies(cookies: list[dict]) -> list[dict]:
@@ -95,6 +260,11 @@ async def fetch_posts(
         List of post dictionaries.
     """
     posts: list[dict[str, Any]] = []
+    nav_url = url
+    if site_type == "linkedin":
+        nav_url = _build_linkedin_navigation_urls(url)[0]
+        if nav_url != url:
+            logger.info("[FETCH LINKEDIN] Normalized URL for navigation: %s", nav_url)
 
     today_midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     cutoff_date = today_midnight - timedelta(days=days_back)
@@ -121,9 +291,15 @@ async def fetch_posts(
                 page.set_default_timeout(page_timeout)
 
                 # Navigate to the URL
-                logger.info(f"[FETCH] Navigating to {url}")
+                logger.info(f"[FETCH] Navigating to {nav_url}")
                 wait_until = "commit" if site_type in ("bossjob", "linkedin") else "networkidle"
-                await page.goto(url, wait_until=wait_until, timeout=page_timeout)
+                await _goto_with_linkedin_fallback(
+                    page=page,
+                    url=nav_url,
+                    site_type=site_type,
+                    timeout=page_timeout,
+                    wait_until=wait_until,
+                )
 
                 # Site-specific parsing
                 if site_type == "v2ex":
@@ -139,14 +315,14 @@ async def fetch_posts(
                     return []
 
             sanitized_cookies = _sanitize_cookies(cookies) if cookies else None
-            posts = await scraper.scrape(url, site_type, extract_fn, cookies=sanitized_cookies)
+            posts = await scraper.scrape(nav_url, site_type, extract_fn, cookies=sanitized_cookies)
             return posts
 
         except ScraperFailure as e:
-            logger.error(f"[FETCH] Self-healing scraper failed for {url}: {e}")
+            logger.error(f"[FETCH] Self-healing scraper failed for {nav_url}: {e}")
             # Fall through to legacy fetcher as backup
         except Exception as e:
-            logger.error(f"[FETCH] Self-healing scraper error for {url}: {e}", exc_info=True)
+            logger.error(f"[FETCH] Self-healing scraper error for {nav_url}: {e}", exc_info=True)
             # Fall through to legacy fetcher as backup
 
     # Legacy fetcher (fallback)
@@ -169,10 +345,16 @@ async def fetch_posts(
             page.set_default_timeout(page_timeout)
 
             # Navigate to the URL
-            logger.info(f"[FETCH] Navigating to {url}")
+            logger.info(f"[FETCH] Navigating to {nav_url}")
             # Use less strict wait for SPA sites with lots of ads/analytics
             wait_until = "commit" if site_type in ("bossjob", "linkedin") else "networkidle"
-            await page.goto(url, wait_until=wait_until, timeout=page_timeout)
+            await _goto_with_linkedin_fallback(
+                page=page,
+                url=nav_url,
+                site_type=site_type,
+                timeout=page_timeout,
+                wait_until=wait_until,
+            )
 
             # Site-specific parsing
             if site_type == "v2ex":
@@ -190,7 +372,7 @@ async def fetch_posts(
             await browser.close()
 
     except Exception as e:
-        logger.error(f"[FETCH] Error fetching from {url}: {e}", exc_info=True)
+        logger.error(f"[FETCH] Error fetching from {nav_url}: {e}", exc_info=True)
 
     return posts
 
@@ -932,7 +1114,54 @@ async def _fetch_linkedin_posts(
         await page.evaluate("window.scrollTo(0, Math.max(500, document.body.scrollHeight * 0.25))")
         await asyncio.sleep(2)
 
+    async def _is_login_page() -> bool:
+        try:
+            state = await page.evaluate(
+                """
+                () => {
+                    const href = location.href || '';
+                    const title = (document.title || '').toLowerCase();
+                    return {
+                        href,
+                        title,
+                        hasLoginForm: !!document.querySelector('form.login__form, #username, input[name="session_key"]'),
+                    };
+                }
+                """
+            )
+            href = (state.get("href") or "").lower()
+            title = (state.get("title") or "").lower()
+            return (
+                "/login" in href
+                or "session_redirect" in href
+                or "登录" in title
+                or "sign in" in title
+                or bool(state.get("hasLoginForm"))
+            )
+        except Exception:
+            return False
+
+    async def _try_public_jobs_fallback() -> None:
+        fallback_urls = [
+            "https://www.linkedin.com/jobs/search/?keywords=software%20engineer&location=Worldwide&f_WT=2",
+            "https://www.linkedin.com/jobs/search/?keywords=software%20engineer",
+            "https://www.linkedin.com/jobs/",
+        ]
+        for fallback_url in fallback_urls:
+            try:
+                logger.info(f"[FETCH LINKEDIN] Login redirect detected, trying fallback: {fallback_url}")
+                await page.goto(fallback_url, wait_until="domcontentloaded", timeout=60000)
+                await _wait_for_linkedin_cards()
+                if not await _is_login_page():
+                    logger.info(f"[FETCH LINKEDIN] Fallback page ready: {page.url}")
+                    return
+            except Exception:
+                continue
+
     try:
+        if await _is_login_page():
+            await _try_public_jobs_fallback()
+
         for page_num in range(max_pages):
             logger.info(f"[FETCH LINKEDIN] Page {page_num + 1}/{max_pages}")
             await _wait_for_linkedin_cards()
@@ -972,6 +1201,12 @@ async def _fetch_linkedin_posts(
                         );
                         const location = (locEl?.innerText || '').trim();
 
+                        const postedEl = card.querySelector(
+                            'time, .job-card-container__footer-item, .job-card-container__listed-time, '
+                            + '[class*="listed"], [class*="time"]'
+                        );
+                        const postedText = (postedEl?.innerText || '').trim();
+
                         const dedupKey = jobId || jobUrl;
                         if (!dedupKey || seen.has(dedupKey)) return;
                         seen.add(dedupKey);
@@ -983,6 +1218,7 @@ async def _fetch_linkedin_posts(
                                 company,
                                 location,
                                 job_url: jobUrl,
+                                posted_text: postedText,
                                 card_index: index,
                                 is_auth: true,
                             });
@@ -1013,12 +1249,18 @@ async def _fetch_linkedin_posts(
                             );
                             const location = (locEl?.innerText || '').trim();
 
+                            const postedEl = container?.querySelector(
+                                'time, .job-search-card__listdate, [class*="time"], [class*="listed"]'
+                            );
+                            const postedText = (postedEl?.innerText || '').trim();
+
                             jobs.push({
                                 job_id: jobId,
                                 title,
                                 company,
                                 location,
                                 job_url: href,
+                                posted_text: postedText,
                                 card_index: index,
                                 is_auth: true,
                             });
@@ -1087,6 +1329,42 @@ async def _fetch_linkedin_posts(
                         () => {
                             const result = { description: '', salary: '' };
 
+                                                        const extractTimeTexts = () => {
+                                                                const nodes = Array.from(document.querySelectorAll(
+                                                                    '.job-details-jobs-unified-top-card__job-insight, '
+                                                                    + '.job-details-jobs-unified-top-card__job-insight-view-model-secondary, '
+                                                                    + 'time, [class*="insight"], [class*="posted"], [class*="repost"]'
+                                                                ));
+                                                                const texts = nodes
+                                                                    .map((n) => (n.innerText || '').trim())
+                                                                    .filter(Boolean)
+                                                                    .filter((v) => v.length < 120);
+                                                                const joined = texts.join(' | ');
+                                                                let published = '';
+                                                                let updated = '';
+                                                                const agoRegex = /(\d+\s*(minute|min|hour|day|week|month|year)s?\s+ago|\d+\s*(分钟|小时|天|周|个月|月|年)前)/i;
+
+                                                                for (const v of texts) {
+                                                                    const lower = v.toLowerCase();
+                                                                    if (!updated && (lower.includes('repost') || lower.includes('updated') || lower.includes('更新') || lower.includes('重新发布'))) {
+                                                                        updated = v;
+                                                                    }
+                                                                    if (!published && agoRegex.test(v)) {
+                                                                        published = v;
+                                                                    }
+                                                                }
+
+                                                                if (!published) {
+                                                                    const m = joined.match(agoRegex);
+                                                                    if (m) published = m[0];
+                                                                }
+                                                                if (!updated && /(repost|updated|更新|重新发布)/i.test(joined)) {
+                                                                    updated = joined;
+                                                                }
+
+                                                                return { published_text: published, updated_text: updated };
+                                                        };
+
                             const descEl = document.querySelector(
                                 '.jobs-description__content .jobs-description-content__text, '
                                 + '.jobs-description-content__text--stretch, '
@@ -1107,11 +1385,19 @@ async def _fetch_linkedin_posts(
                                 result.salary = (salaryEl.innerText || '').trim();
                             }
 
+                            const times = extractTimeTexts();
+                            result.published_text = times.published_text;
+                            result.updated_text = times.updated_text;
+
                             return result;
                         }
                     """)
                     description = detail_data.get("description", "")
                     salary = detail_data.get("salary", "")
+                    published_text = (detail_data.get("published_text") or job_data.get("posted_text") or "").strip()
+                    updated_text = (detail_data.get("updated_text") or "").strip()
+                    published_at = _parse_relative_datetime(published_text)
+                    updated_at = _parse_relative_datetime(updated_text)
 
                     full_text_parts = [title or f"LinkedIn Job {job_id}"]
                     if company:
@@ -1136,6 +1422,10 @@ async def _fetch_linkedin_posts(
                         "location": location,
                         "requirements": requirements,
                         "description": description,
+                        "source_published_text": published_text,
+                        "source_updated_text": updated_text,
+                        "source_published_at": published_at,
+                        "source_updated_at": updated_at,
                     })
 
                     logger.info(f"[FETCH LINKEDIN] ✓ {posts[-1]['title'][:50]} ({len(full_text)} chars)")

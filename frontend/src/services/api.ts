@@ -28,6 +28,10 @@ export interface Job {
   contact?: string;
   contact_type?: string;
   summary?: string;
+  source_published_at?: string;
+  source_updated_at?: string;
+  source_published_text?: string;
+  source_updated_text?: string;
   translated_text?: string;
   confidence?: string;
   is_applied: boolean;
