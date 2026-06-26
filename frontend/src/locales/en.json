@@ -60,7 +60,8 @@
     "developers": "Developers",
     "messages": "Messages",
     "telegramAccounts": "Telegram Accounts",
-    "websites": "Websites"
+    "websites": "Websites",
+    "applyRecords": "Apply Records"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -272,6 +273,17 @@
     "lastFetch": "Last fetch",
     "deleteConfirm": "Delete Website Source",
     "deleteWarning": "Are you sure you want to delete this website source? This action cannot be undone."
+  },
+  "applyRecords": {
+    "title": "Apply Records",
+    "searchPlaceholder": "Search status/reason/job...",
+    "time": "Time",
+    "status": "Status",
+    "site": "Site",
+    "job": "Job",
+    "jobUrl": "Job URL",
+    "reason": "Reason",
+    "resume": "Resume"
   },
   "developers": {
     "title": "Developers",

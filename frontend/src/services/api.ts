@@ -53,6 +53,26 @@ export interface Job {
   };
 }
 
+export interface JobApplyRecord {
+  id: number;
+  job_id: number;
+  status: 'success' | 'failed' | 'skipped' | 'dry_run' | string;
+  reason?: string;
+  site?: string;
+  job_url?: string;
+  job_real_url?: string;
+  resume_language?: string;
+  resume_file?: string;
+  details?: Record<string, any>;
+  created_at?: string;
+  job?: {
+    id: number;
+    title?: string;
+    company?: string;
+    real_url?: string;
+  };
+}
+
 export interface Developer {
   id: number;
   name?: string;
@@ -245,6 +265,18 @@ const api = {
     const response = await fetch(`${API_BASE}/api/jobs/${id}`, {
       method: 'DELETE',
     });
+    return response.json();
+  },
+
+  getJobApplyRecords: async (params?: { status?: string; site?: string; limit?: number; offset?: number }): Promise<{ records: JobApplyRecord[]; total: number; limit: number; offset: number }> => {
+    const query = new URLSearchParams(params as any).toString();
+    const response = await fetch(`${API_BASE}/api/job-apply-records${query ? `?${query}` : ''}`);
+    return response.json();
+  },
+
+  getJobApplyRecordsByJob: async (jobId: number, params?: { limit?: number; offset?: number }): Promise<{ records: JobApplyRecord[]; total: number; limit: number; offset: number }> => {
+    const query = new URLSearchParams(params as any).toString();
+    const response = await fetch(`${API_BASE}/api/jobs/${jobId}/apply-records${query ? `?${query}` : ''}`);
     return response.json();
   },
 

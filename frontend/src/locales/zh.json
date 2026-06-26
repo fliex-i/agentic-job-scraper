@@ -60,7 +60,8 @@
     "developers": "开发者",
     "messages": "消息",
     "telegramAccounts": "Telegram 账号",
-    "websites": "网站"
+    "websites": "网站",
+    "applyRecords": "投递记录"
   },
   "dashboard": {
     "title": "仪表板",
@@ -272,6 +273,17 @@
     "lastFetch": "上次获取",
     "deleteConfirm": "删除网站来源",
     "deleteWarning": "确定要删除此网站来源吗？此操作无法撤销。"
+  },
+  "applyRecords": {
+    "title": "投递记录",
+    "searchPlaceholder": "搜索状态/原因/职位...",
+    "time": "时间",
+    "status": "状态",
+    "site": "网站",
+    "job": "职位",
+    "jobUrl": "岗位链接",
+    "reason": "原因",
+    "resume": "简历"
   },
   "developers": {
     "title": "开发者",

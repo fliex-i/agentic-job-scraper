@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.connection import get_db
-from app.models import Job, Message
+from app.models import Job, JobApplyRecord, Message
+from services.auto_apply_service import AutoApplyService
 
 
 def register_job_routes(app):
@@ -168,3 +169,96 @@ def register_job_routes(app):
         except Exception as e:
             await db.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to hide job: {str(e)}")
+
+    @app.post("/api/jobs/auto-apply-frontend-remote")
+    async def api_auto_apply_frontend_remote(
+        limit: int = 20,
+        dry_run: bool = False,
+        db: AsyncSession = Depends(get_db),
+    ):
+        """Auto-apply loaded jobs via Playwright.
+
+        - Loads not-hidden, not-yet-applied jobs.
+        - Attempts application for every loaded job (no skip branch).
+        - Picks Chinese/English resume docx automatically from repo root.
+        - Supports LinkedIn/Bossjob flows; unsupported jobs are recorded as failed.
+        """
+        try:
+            if limit < 1 or limit > 200:
+                raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+
+            service = AutoApplyService(db)
+            result = await service.run_frontend_remote_auto_apply(limit=limit, dry_run=dry_run)
+            return {"success": True, **result}
+        except HTTPException:
+            raise
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to auto-apply jobs: {str(e)}")
+
+    @app.get("/api/job-apply-records")
+    async def api_job_apply_records(
+        status: Optional[str] = None,
+        site: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        db: AsyncSession = Depends(get_db),
+    ):
+        """List auto-apply records with optional status/site filters."""
+        if limit < 1 or limit > 500:
+            raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+
+        query = select(JobApplyRecord).options(selectinload(JobApplyRecord.job))
+        if status:
+            query = query.filter(JobApplyRecord.status == status)
+        if site:
+            query = query.filter(JobApplyRecord.site == site)
+
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar() or 0
+
+        result = await db.execute(
+            query.order_by(JobApplyRecord.created_at.desc()).offset(offset).limit(limit)
+        )
+        records = result.scalars().all()
+
+        return {
+            "records": [r.to_dict() for r in records],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @app.get("/api/jobs/{job_id}/apply-records")
+    async def api_job_apply_records_by_job(
+        job_id: int,
+        limit: int = 50,
+        offset: int = 0,
+        db: AsyncSession = Depends(get_db),
+    ):
+        """List auto-apply records for a specific job."""
+        if limit < 1 or limit > 500:
+            raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+
+        query = (
+            select(JobApplyRecord)
+            .options(selectinload(JobApplyRecord.job))
+            .filter(JobApplyRecord.job_id == job_id)
+        )
+
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar() or 0
+
+        result = await db.execute(
+            query.order_by(JobApplyRecord.created_at.desc()).offset(offset).limit(limit)
+        )
+        records = result.scalars().all()
+
+        return {
+            "records": [r.to_dict() for r in records],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }

@@ -179,6 +179,7 @@ class Job(Base):
     message = relationship("Message", back_populates="job", lazy="selectin")
     channel = relationship("Channel", back_populates="jobs", lazy="selectin")
     website_source = relationship("WebsiteSource", back_populates="jobs")
+    apply_records = relationship("JobApplyRecord", back_populates="job", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Job {self.id} title={self.title}>"
@@ -212,6 +213,52 @@ class Job(Base):
             "applied_at": self.applied_at.isoformat() if self.applied_at else None,
             "notes": self.notes,
             "message": self.message.to_dict() if self.message else None,
+        }
+
+
+class JobApplyRecord(Base):
+    """Persist auto-apply attempts for audit and troubleshooting."""
+
+    __tablename__ = "job_apply_records"
+
+    id = Column(Integer, primary_key=True)
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String, nullable=False)  # success, failed, skipped, dry_run
+    reason = Column(String, nullable=True)
+    site = Column(String, nullable=True)  # linkedin, bossjob, etc.
+    job_url = Column(String, nullable=True)
+    resume_language = Column(String, nullable=True)  # zh, en
+    resume_file = Column(String, nullable=True)
+    details = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    job = relationship("Job", back_populates="apply_records")
+
+    def to_dict(self) -> dict:
+        real_job_url = self.job.contact if self.job and self.job.contact else None
+        if not real_job_url and self.job and self.job.company_link:
+            real_job_url = self.job.company_link
+        if not real_job_url:
+            real_job_url = self.job_url
+
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "status": self.status,
+            "reason": self.reason,
+            "site": self.site,
+            "job_url": self.job_url,
+            "job_real_url": real_job_url,
+            "resume_language": self.resume_language,
+            "resume_file": self.resume_file,
+            "details": self.details or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "job": {
+                "id": self.job.id,
+                "title": self.job.title,
+                "company": self.job.company,
+                "real_url": real_job_url,
+            } if self.job else None,
         }
 
 

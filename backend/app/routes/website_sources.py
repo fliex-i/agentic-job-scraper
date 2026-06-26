@@ -14,6 +14,7 @@ from app.models import WebsiteSource, Message, Job
 from web_crawler import Fetcher, Extractor
 from app.tasks import broadcast_progress, create_operation, update_operation, stop_website_operation, website_stop_events, record_fetch_outcome
 from services.ollama_service import get_analyzer, is_ollama_available
+from services.auto_apply_service import AutoApplyService
 from app.autonomous.budget_guard import OllamaBudgetGuard
 from app.autonomous.state_manager import AutonomousStateManager
 
@@ -839,6 +840,7 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
             # Save posts as Jobs directly (Bossjob has structured data)
             jobs_added = 0
             jobs_filtered = 0
+            apply_service = AutoApplyService(db)
             for post in posts:
                 try:
                     title = post.get("title", "")
@@ -883,6 +885,11 @@ async def _fetch_bossjob_bg(source_id: int, operation_id: str, days_back: int):
                         is_hidden=False,
                     )
                     db.add(job)
+                    await db.flush()
+                    await db.refresh(job)
+
+                    # Immediately apply newly fetched jobs.
+                    await apply_service.apply_and_record_job(job, dry_run=False)
                     jobs_added += 1
                 except Exception as e:
                     logger.warning(f"[BG FETCH BOSSJOB] Error saving job: {e}")
@@ -1001,6 +1008,7 @@ async def _fetch_linkedin_bg(source_id: int, operation_id: str, days_back: int):
             # Save posts as Job records directly (structured data)
             jobs_added = 0
             jobs_filtered = 0
+            apply_service = AutoApplyService(db)
             for post in posts:
                 try:
                     title = post.get("title", "")
@@ -1042,6 +1050,11 @@ async def _fetch_linkedin_bg(source_id: int, operation_id: str, days_back: int):
                         is_hidden=False,
                     )
                     db.add(job)
+                    await db.flush()
+                    await db.refresh(job)
+
+                    # Immediately apply newly fetched jobs.
+                    await apply_service.apply_and_record_job(job, dry_run=False)
                     jobs_added += 1
                 except Exception as e:
                     logger.warning(f"[BG FETCH LINKEDIN] Error saving job: {e}")

@@ -15,6 +15,7 @@ from app.models import AnalysisRun, Channel, Developer, Job, Message, Operation,
 from telegram_processor import TelegramClientManager, fetch_messages
 from telegram_processor.listener import TelegramMessageListener
 from services.ollama_service import get_analyzer, is_ollama_available, should_analyze_message
+from services.auto_apply_service import AutoApplyService
 from app.autonomous.budget_guard import OllamaBudgetGuard
 from app.autonomous.state_manager import AutonomousStateManager
 
@@ -997,6 +998,11 @@ async def analyze_messages(
                     db.add(job)
                     await db.flush()
                     await db.refresh(job)
+
+                    # Immediately apply to newly discovered jobs.
+                    apply_service = AutoApplyService(db)
+                    await apply_service.apply_and_record_job(job, dry_run=False)
+
                     jobs_added += 1
                     message.analysis_status = "analyzed"
 
@@ -1617,6 +1623,11 @@ async def analyze_website_posts(
                         db.add(job_obj)
                         await db.flush()
                         await db.refresh(job_obj)
+
+                        # Immediately apply to newly discovered jobs.
+                        apply_service = AutoApplyService(db)
+                        await apply_service.apply_and_record_job(job_obj, dry_run=False)
+
                         jobs_added += 1
                         msg_job_added += 1
 
